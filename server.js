@@ -183,7 +183,7 @@ const bodyFor = (evt, m) => {
 const last = new Map(); // estado previo por matchId
 
 const fetchJson = async (url) => {
-  const res = await fetch(url, { cache: 'no-store' });
+  const res = await fetch(url, { headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };

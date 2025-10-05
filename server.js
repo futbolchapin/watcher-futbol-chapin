@@ -247,6 +247,8 @@ const tickMatch = async (matchId) => {
     return;
   }
   const m = normalizeMatch(raw);
+  console.log('[debug]', m.matchId || id, 'status=', m.statusId, 'score=', m.homeGoals + '-' + m.awayGoals, 'lineups=', m.lineupsPublished, 'names=', m.homeName, 'vs', m.awayName);
+
   if (!m.matchId) m.matchId = String(matchId); // respaldo
 
   const prev = last.get(m.matchId);

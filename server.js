@@ -14,6 +14,10 @@ const TEAM_PREFIX  = process.env.TEAM_PREFIX  || 'team_';
 const LEGACY_TOPIC = process.env.LEGACY_TOPIC || '';
 const SEND_TEST_ON_BOOT = process.env.SEND_TEST_ON_BOOT === '1';
 
+const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
+const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
+
+
 // ➕ minutos antes del inicio para PRE30 (puedes cambiar a 1 para probar rápido)
 const PRE_PUSH_MIN = Number(process.env.PRE_PUSH_MIN || 30);
 
@@ -87,6 +91,23 @@ const sendToTopics = async (topics, notification, data = {}) => {
     }
   }
 };
+
+const sendCondition = async (condition, notification, data = {}) => {
+  const message = {
+    condition,
+    notification,
+    data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+    android: { priority: 'high' },
+    apns: { headers: { 'apns-priority': '10' } }
+  };
+  try {
+    const id = await admin.messaging().send(message);
+    console.log('[push] ok', condition, id, notification.title);
+  } catch (e) {
+    console.error('[push] error', condition, e.message);
+  }
+};
+
 
 const pick = (obj, keys, dflt = undefined) => {
   for (const k of keys) {
@@ -242,13 +263,8 @@ const loadMatchIds = async () => {
 };
 
 const handleEvent = async (evt, m) => {
-  const topics = [
-    `${TOPIC_PREFIX}${m.matchId}`,
-    m.homeTeamId && `${TEAM_PREFIX}${m.homeTeamId}`,
-    m.awayTeamId && `${TEAM_PREFIX}${m.awayTeamId}`,
-    LEGACY_TOPIC || null
-  ];
   const notification = { title: titleFor(evt, m), body: bodyFor(evt, m) };
+
   const data = {
     screen: 'Match',
     tab: tabForEvent(evt),
@@ -262,8 +278,24 @@ const handleEvent = async (evt, m) => {
   if (m.ymd)  data.ymd  = m.ymd;
   if (m.hhmm) data.hhmm = m.hhmm;
   if (m.gmt)  data.gmt  = m.gmt;
-  await sendToTopics(topics, notification, data);
+
+  // --- Condition "match OR team(s)" para evitar duplicados ---
+  const parts = [];
+  if (ENABLE_MATCH_TOPICS) parts.push(`'${TOPIC_PREFIX}${m.matchId}' in topics`);
+  if (ENABLE_TEAM_TOPICS && m.homeTeamId) parts.push(`'${TEAM_PREFIX}${m.homeTeamId}' in topics`);
+  if (ENABLE_TEAM_TOPICS && m.awayTeamId) parts.push(`'${TEAM_PREFIX}${m.awayTeamId}' in topics`);
+
+  if (parts.length) {
+    const condition = parts.join(' || ');
+    await sendCondition(condition, notification, data);
+  }
+
+  // (Opcional) Legacy aparte si lo tienes activo
+  if (LEGACY_TOPIC) {
+    await sendToTopics([LEGACY_TOPIC], notification, data);
+  }
 };
+
 
 const last = new Map();
 

@@ -70,67 +70,55 @@ const toBool = (v) => {
   return !!v;
 };
 
-// Normaliza el JSON del partido (DataFactory-friendly)
-// helpers ya existen arriba: pick, toNum, toBool
-
-// ⬇️ REEMPLAZA todo normalizeMatch por esto
+// REEMPLAZA normalizeMatch COMPLETA POR ESTA VERSIÓN
 const normalizeMatch = (raw) => {
-  // team ids y nombres
-  const homeTeamId = String(pick(raw, [
-    'homeTeamId','home.id','homeTeam.id','teams.home.id','homeTeam.teamId'
-  ], ''));
-  const awayTeamId = String(pick(raw, [
-    'awayTeamId','away.id','awayTeam.id','teams.away.id','awayTeam.teamId'
-  ], ''));
+  const m  = raw.match || {};
+  const st = raw.status || {};
+  const teamsMap = raw.teams || {};
 
-  const homeName = String(pick(raw, [
-    'homeTeamName','homeName','home.name','home.shortName','homeTeam','teams.home.name'
-  ], 'Local'));
-  const awayName = String(pick(raw, [
-    'awayTeamName','awayName','away.name','away.shortName','awayTeam','teams.away.name'
-  ], 'Visitante'));
+  // IDs y nombres (vienen en match.*)
+  const homeTeamId = String(m.homeTeamId ?? pick(raw, ['homeTeamId','home.id','teams.home.id'], ''));
+  const awayTeamId = String(m.awayTeamId ?? pick(raw, ['awayTeamId','away.id','teams.away.id'], ''));
+  let homeName = String(m.homeTeamName ?? '');
+  let awayName = String(m.awayTeamName ?? '');
+  if (!homeName && homeTeamId && teamsMap[homeTeamId]?.name) homeName = teamsMap[homeTeamId].name;
+  if (!awayName && awayTeamId && teamsMap[awayTeamId]?.name) awayName = teamsMap[awayTeamId].name;
+  if (!homeName) homeName = 'Local';
+  if (!awayName) awayName = 'Visitante';
 
-  // status/minuto
-  const statusId = toNum(pick(raw, [
-    'statusId','status.statusId','match.status.statusId','match.statusId','live.statusId'
-  ], 0));
-  const minute  = String(pick(raw, ['minute','clock.minute','live.minute','match.minute'], ''));
+  // Estado / minuto
+  const statusId = toNum(st.statusId ?? raw.statusId, 0);
+  const minute   = String(pick(raw, ['minute','live.minute','match.minute'], ''));
 
-  // 🎯 marcador: primero intenta leer objeto scores con llaves por teamId
-  const scoresObj = pick(raw, ['scores','scoresStatus','scoreStatus'], null);
+  // Marcador: objeto scoreStatus/scoresStatus/scores con llaves = teamId
+  const scoresObj =
+    raw.scoreStatus || raw.scoresStatus || raw.scores ||
+    m.scoreStatus   || m.scoresStatus   || m.scores    || null;
+
   const readTeamScore = (obj, tid) => {
     if (!obj || !tid) return null;
-    const k = String(tid);
-    const v = obj[k] ?? obj[Number(k)];
+    const key = String(tid);
+    const v = obj[key] ?? obj[Number(key)];
     if (!v) return null;
     return toNum(v.score ?? v.value ?? v.goals ?? v.goalsQty, null);
   };
+
   let homeGoals = readTeamScore(scoresObj, homeTeamId);
   let awayGoals = readTeamScore(scoresObj, awayTeamId);
 
-  // fallback si no vinieron en scores: usa campos comunes o summary.goals.homeQty/awayQty
-  if (homeGoals == null) {
-    homeGoals = toNum(pick(raw, [
-      'homeGoals','homeScore','score.home','home.goals','match.homeGoals','summary.goals.homeQty','goals.homeQty'
-    ], 0));
-  }
-  if (awayGoals == null) {
-    awayGoals = toNum(pick(raw, [
-      'awayGoals','awayScore','score.away','away.goals','match.awayGoals','summary.goals.awayQty','goals.awayQty'
-    ], 0));
-  }
+  // Fallback por si no viene el objeto anterior
+  if (homeGoals == null) homeGoals = toNum(pick(raw, ['summary.goals.homeQty','homeGoals','homeScore','score.home'], 0));
+  if (awayGoals == null) awayGoals = toNum(pick(raw, ['summary.goals.awayQty','awayGoals','awayScore','score.away'], 0));
 
-  // alineaciones
-  const lineupsPublished = toBool(pick(raw, [
-    'lineupsPublished','hasLineups','lineupConfirmed','lineUpConfirmed','lineups.home.length'
-  ], false));
+  // Extras para deep-link
+  const matchId = String(m.matchId ?? raw.matchId ?? raw.id ?? raw.eventId ?? '');
+  const scope   = String(m.channel ?? raw.channel ?? raw.scope ?? SCOPE_DEFAULT);
+  const ymd     = String(m.date ?? raw.date ?? '');
+  const hhmm    = String(m.scheduledStart ?? raw.scheduledStart ?? '');
+  const gmt     = String(m.gmt ?? raw.gmt ?? raw.stadiumGMT ?? '');
 
-  // extras (para deep-link)
-  const scope   = String(pick(raw, ['scope','tournament.scope','channel'], SCOPE_DEFAULT));
-  const matchId = String(pick(raw, ['matchId','id','eventId'], ''));
-  const ymd     = String(pick(raw, ['date','ymd','match.date','startDate','scheduledYmd'], ''));
-  const hhmm    = String(pick(raw, ['scheduledStart','startTime','match.scheduledStart'], ''));
-  const gmt     = String(pick(raw, ['gmt','stadiumGMT','match.gmt'], ''));
+  // Alineaciones
+  const lineupsPublished = toBool(st.lineUpConfirmed ?? raw.lineUpConfirmed ?? pick(raw, ['lineups.home.length'], false));
 
   return {
     matchId, scope,
@@ -139,6 +127,7 @@ const normalizeMatch = (raw) => {
     ymd, hhmm, gmt
   };
 };
+
 
 
 // Pestaña correcta para tu app (con espacio)

@@ -71,79 +71,63 @@ const toBool = (v) => {
 };
 
 // Normaliza el JSON del partido (DataFactory-friendly)
+// helpers ya existen arriba: pick, toNum, toBool
+
+// ⬇️ REEMPLAZA todo normalizeMatch por esto
 const normalizeMatch = (raw) => {
-  const statusId = toNum(pick(raw, [
-    'statusId',
-    'status.statusId',
-    'match.status.statusId',
-    'match.statusId',
-    'live.statusId'
-  ], 0));
-
-  const homeGoals = toNum(pick(raw, [
-    'homeGoals',
-    'homeScore',
-    'score.home',
-    'home.goals',
-    'match.homeGoals'
-  ], 0));
-
-  const awayGoals = toNum(pick(raw, [
-    'awayGoals',
-    'awayScore',
-    'score.away',
-    'away.goals',
-    'match.awayGoals'
-  ], 0));
-
-  const lineupsPublished = toBool(pick(raw, [
-    'lineupsPublished',
-    'hasLineups',
-    'lineupConfirmed',
-    'lineUpConfirmed',
-    'lineups.home.length'
-  ], false));
-
+  // team ids y nombres
   const homeTeamId = String(pick(raw, [
-    'homeTeamId',
-    'home.id',
-    'homeTeam.id',
-    'teams.home.id',
-    'homeTeam.teamId'
+    'homeTeamId','home.id','homeTeam.id','teams.home.id','homeTeam.teamId'
   ], ''));
-
   const awayTeamId = String(pick(raw, [
-    'awayTeamId',
-    'away.id',
-    'awayTeam.id',
-    'teams.away.id',
-    'awayTeam.teamId'
+    'awayTeamId','away.id','awayTeam.id','teams.away.id','awayTeam.teamId'
   ], ''));
 
   const homeName = String(pick(raw, [
-    'homeName',
-    'home.name',
-    'home.shortName',
-    'homeTeamName',
-    'homeTeamShortName',
-    'homeTeam',            // a veces viene como string
-    'teams.home.name'
+    'homeTeamName','homeName','home.name','home.shortName','homeTeam','teams.home.name'
   ], 'Local'));
-
   const awayName = String(pick(raw, [
-    'awayName',
-    'away.name',
-    'away.shortName',
-    'awayTeamName',
-    'awayTeamShortName',
-    'awayTeam',
-    'teams.away.name'
+    'awayTeamName','awayName','away.name','away.shortName','awayTeam','teams.away.name'
   ], 'Visitante'));
 
-  const scope   = String(pick(raw, ['scope', 'tournament.scope', 'channel'], SCOPE_DEFAULT));
-  const matchId = String(pick(raw, ['matchId', 'id', 'eventId'], ''));
-  const minute  = String(pick(raw, ['minute', 'clock.minute', 'live.minute', 'match.minute'], ''));
+  // status/minuto
+  const statusId = toNum(pick(raw, [
+    'statusId','status.statusId','match.status.statusId','match.statusId','live.statusId'
+  ], 0));
+  const minute  = String(pick(raw, ['minute','clock.minute','live.minute','match.minute'], ''));
 
+  // 🎯 marcador: primero intenta leer objeto scores con llaves por teamId
+  const scoresObj = pick(raw, ['scores','scoresStatus','scoreStatus'], null);
+  const readTeamScore = (obj, tid) => {
+    if (!obj || !tid) return null;
+    const k = String(tid);
+    const v = obj[k] ?? obj[Number(k)];
+    if (!v) return null;
+    return toNum(v.score ?? v.value ?? v.goals ?? v.goalsQty, null);
+  };
+  let homeGoals = readTeamScore(scoresObj, homeTeamId);
+  let awayGoals = readTeamScore(scoresObj, awayTeamId);
+
+  // fallback si no vinieron en scores: usa campos comunes o summary.goals.homeQty/awayQty
+  if (homeGoals == null) {
+    homeGoals = toNum(pick(raw, [
+      'homeGoals','homeScore','score.home','home.goals','match.homeGoals','summary.goals.homeQty','goals.homeQty'
+    ], 0));
+  }
+  if (awayGoals == null) {
+    awayGoals = toNum(pick(raw, [
+      'awayGoals','awayScore','score.away','away.goals','match.awayGoals','summary.goals.awayQty','goals.awayQty'
+    ], 0));
+  }
+
+  // alineaciones
+  const lineupsPublished = toBool(pick(raw, [
+    'lineupsPublished','hasLineups','lineupConfirmed','lineUpConfirmed','lineups.home.length'
+  ], false));
+
+  // extras (para deep-link)
+  const scope   = String(pick(raw, ['scope','tournament.scope','channel'], SCOPE_DEFAULT));
+  const matchId = String(pick(raw, ['matchId','id','eventId'], ''));
   const ymd     = String(pick(raw, ['date','ymd','match.date','startDate','scheduledYmd'], ''));
   const hhmm    = String(pick(raw, ['scheduledStart','startTime','match.scheduledStart'], ''));
   const gmt     = String(pick(raw, ['gmt','stadiumGMT','match.gmt'], ''));
@@ -155,6 +139,7 @@ const normalizeMatch = (raw) => {
     ymd, hhmm, gmt
   };
 };
+
 
 // Pestaña correcta para tu app (con espacio)
 const tabForEvent = (evt) => {

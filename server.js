@@ -59,26 +59,86 @@ const pick = (obj, keys, dflt = undefined) => {
   return dflt;
 };
 
-// Normaliza el JSON del partido a un formato estándar
+// --- helpers para normalizar ---
+const toNum = (v, d = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+const toBool = (v) => {
+  if (v === true || v === 'true' || v === 1 || v === '1') return true;
+  if (Array.isArray(v)) return v.length > 0;
+  return !!v;
+};
+
+// Normaliza el JSON del partido a un formato estándar (DataFactory-friendly)
 const normalizeMatch = (raw) => {
-  const statusId = Number(pick(raw, ['statusId','status','match.statusId','live.statusId'], 0));
-  const homeGoals = Number(pick(raw, [
-    'homeGoals','homeScore','home.goals','home.score','score.home'
+  const statusId = toNum(pick(raw, [
+    'statusId',
+    'status.statusId',        // DF: { status: { statusId: ... } }
+    'match.status.statusId',
+    'match.statusId',
+    'live.statusId'
   ], 0));
-  const awayGoals = Number(pick(raw, [
-    'awayGoals','awayScore','away.goals','away.score','score.away'
+
+  const homeGoals = toNum(pick(raw, [
+    'homeGoals',
+    'homeScore',
+    'score.home',
+    'home.goals',
+    'match.homeGoals'
   ], 0));
-  const lineupsPublished = Boolean(pick(raw, [
-    'lineupsPublished','hasLineups','lineups.hasData','lineups.home.length'
+
+  const awayGoals = toNum(pick(raw, [
+    'awayGoals',
+    'awayScore',
+    'score.away',
+    'away.goals',
+    'match.awayGoals'
+  ], 0));
+
+  const lineupsPublished = toBool(pick(raw, [
+    'lineupsPublished',
+    'hasLineups',
+    'lineupConfirmed',
+    'lineUpConfirmed',
+    'lineups.home.length'
   ], false));
 
-  const homeTeamId = String(pick(raw, ['homeTeamId','home.id','home.teamId','teams.home.id'], ''));
-  const awayTeamId = String(pick(raw, ['awayTeamId','away.id','away.teamId','teams.away.id'], ''));
-  const homeName = String(pick(raw, ['homeName','home.name','teams.home.name'], 'Local'));
-  const awayName = String(pick(raw, ['awayName','away.name','teams.away.name'], 'Visitante'));
-  const scope     = String(pick(raw, ['scope','tournament.scope'], SCOPE_DEFAULT));
-  const matchId   = String(pick(raw, ['matchId','id','eventId'], ''));
-  const minute    = String(pick(raw, ['minute','clock.minute','live.minute'], ''));
+  const homeTeamId = String(pick(raw, [
+    'homeTeamId',
+    'home.id',
+    'homeTeam.id',
+    'teams.home.id',
+    'homeTeam.teamId'
+  ], ''));
+
+  const awayTeamId = String(pick(raw, [
+    'awayTeamId',
+    'away.id',
+    'awayTeam.id',
+    'teams.away.id',
+    'awayTeam.teamId'
+  ], ''));
+
+  const homeName = String(pick(raw, [
+    'homeName',
+    'home.name',
+    'homeTeam',           // DF suele traer "homeTeam": "Aurora"
+    'homeTeam.name',
+    'teams.home.name'
+  ], 'Local'));
+
+  const awayName = String(pick(raw, [
+    'awayName',
+    'away.name',
+    'awayTeam',
+    'awayTeam.name',
+    'teams.away.name'
+  ], 'Visitante'));
+
+  const scope   = String(pick(raw, ['scope', 'tournament.scope', 'channel'], SCOPE_DEFAULT));
+  const matchId = String(pick(raw, ['matchId', 'id', 'eventId'], ''));
+  const minute  = String(pick(raw, ['minute', 'clock.minute', 'live.minute', 'match.minute'], ''));
 
   return {
     matchId, scope,
@@ -86,6 +146,7 @@ const normalizeMatch = (raw) => {
     homeTeamId, awayTeamId, homeName, awayName, minute
   };
 };
+
 
 // Construye deeplink/tab por evento
 const tabForEvent = (evt) => {

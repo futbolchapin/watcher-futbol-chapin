@@ -190,8 +190,12 @@ const fetchJson = async (url) => {
 
 const getMatchUrl = (id) => {
   if (!FEED_TMPL.includes('{id}')) throw new Error('FEED_TMPL debe contener {id}');
-  return FEED_TMPL.replace('{id}', String(id));
+  const base = FEED_TMPL.replace('{id}', String(id));
+  const sep = base.includes('?') ? '&' : '?';
+  // param anti-caché (cada poll trae la versión más reciente)
+  return `${base}${sep}cb=${Date.now()}`;
 };
+
 
 const loadMatchIds = async () => {
   if (FEED_LIST_URL) {

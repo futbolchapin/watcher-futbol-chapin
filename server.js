@@ -35,18 +35,37 @@ const mem = new Set();
 try {
   if (process.env.REDIS_URL) {
     const IORedis = require('ioredis');
-    redis = new IORedis(process.env.REDIS_URL);
-    redis.on('error', e => console.error('[redis] error', e.message));
+    const url = process.env.REDIS_URL;
+    const isTls = url.startsWith('rediss://');
+
+    redis = new IORedis(url, {
+      // Aceptar cert self-signed del add-on cuando usa TLS
+      ...(isTls ? { tls: { rejectUnauthorized: false } } : {}),
+      // Evitar que ioredis reintente eternamente y corte el loop
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+    });
+
+    redis.on('connect', () => console.log('[redis] connect ok'));
+    redis.on('error',   (e) => console.error('[redis] error', e.message));
   }
 } catch (e) {
   console.warn('[redis] no disponible', e.message);
 }
+
+// Helpers con fallback a memoria si Redis falla
 const sentKey = (m, tag) => `sent:${m.matchId}:${tag}`;
-const wasSent = async (key) => redis ? (await redis.get(key)) === '1' : mem.has(key);
-const markSent = async (key, ttlSec = 36 * 3600) => {
-  if (redis) await redis.set(key, '1', 'EX', ttlSec);
-  else { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); }
+const wasSent = async (key) => {
+  if (!redis) return mem.has(key);
+  try { return (await redis.get(key)) === '1'; }
+  catch { return mem.has(key); }
 };
+const markSent = async (key, ttlSec = 36 * 3600) => {
+  if (!redis) { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); return; }
+  try { await redis.set(key, '1', 'EX', ttlSec); }
+  catch { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); }
+};
+
 
 // ===== 4) Utils =====
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));

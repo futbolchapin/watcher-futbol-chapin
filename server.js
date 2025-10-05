@@ -1,12 +1,12 @@
 // watcher-futbol-chapin – Worker FCM HTTP v1
 // Eventos: Alineaciones, Inicio (0->1), Entretiempo (5), Segundo Tiempo (6), Final (2), Gol
-// Envia a: match_{matchId}, team_{homeTeamId}, team_{awayTeamId} y LEGACY_TOPIC (opcional)
+// Envía a: match_{matchId}, team_{homeTeamId}, team_{awayTeamId} y LEGACY_TOPIC (opcional)
 
 console.log('[watcher] iniciado');
 
 // ===== 1) Config =====
 const POLL_MS = Number(process.env.POLL_MS || 15000); // 15s por defecto
-const FEED_TMPL = process.env.FEED_TMPL || ''; // p.ej: https://api.tu-dominio.com/match/{id}.json
+const FEED_TMPL = process.env.FEED_TMPL || ''; // ej: https://.../events/{id}.json
 const FEED_LIST_URL = process.env.FEED_LIST_URL || ''; // opcional: URL que devuelve lista de matchIds
 const MATCH_IDS = (process.env.MATCH_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean); // alternativa a FEED_LIST_URL
@@ -14,7 +14,7 @@ const MATCH_IDS = (process.env.MATCH_IDS || '')
 const SCOPE_DEFAULT = process.env.SCOPE_DEFAULT || 'guatemala';
 const TOPIC_PREFIX = process.env.TOPIC_PREFIX || 'match_';
 const TEAM_PREFIX  = process.env.TEAM_PREFIX  || 'team_';
-const LEGACY_TOPIC = process.env.LEGACY_TOPIC || ''; // opcional (compatibilidad clientes viejos)
+const LEGACY_TOPIC = process.env.LEGACY_TOPIC || ''; // opcional (compat clientes viejos)
 const SEND_TEST_ON_BOOT = process.env.SEND_TEST_ON_BOOT === '1'; // opcional
 
 // ===== 2) Firebase Admin =====
@@ -50,7 +50,7 @@ const sendToTopics = async (topics, notification, data = {}) => {
   }
 };
 
-// Detecta claves comunes del JSON (DataFactory u otros) sin romper si cambian los nombres
+// Acceso tolerante
 const pick = (obj, keys, dflt = undefined) => {
   for (const k of keys) {
     const v = k.split('.').reduce((o, p) => (o ? o[p] : undefined), obj);
@@ -59,7 +59,7 @@ const pick = (obj, keys, dflt = undefined) => {
   return dflt;
 };
 
-// --- helpers para normalizar ---
+// helpers
 const toNum = (v, d = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
@@ -70,11 +70,11 @@ const toBool = (v) => {
   return !!v;
 };
 
-// Normaliza el JSON del partido a un formato estándar (DataFactory-friendly)
+// Normaliza el JSON del partido (DataFactory-friendly)
 const normalizeMatch = (raw) => {
   const statusId = toNum(pick(raw, [
     'statusId',
-    'status.statusId',        // DF: { status: { statusId: ... } }
+    'status.statusId',
     'match.status.statusId',
     'match.statusId',
     'live.statusId'
@@ -123,16 +123,20 @@ const normalizeMatch = (raw) => {
   const homeName = String(pick(raw, [
     'homeName',
     'home.name',
-    'homeTeam',           // DF suele traer "homeTeam": "Aurora"
-    'homeTeam.name',
+    'home.shortName',
+    'homeTeamName',
+    'homeTeamShortName',
+    'homeTeam',            // a veces viene como string
     'teams.home.name'
   ], 'Local'));
 
   const awayName = String(pick(raw, [
     'awayName',
     'away.name',
+    'away.shortName',
+    'awayTeamName',
+    'awayTeamShortName',
     'awayTeam',
-    'awayTeam.name',
     'teams.away.name'
   ], 'Visitante'));
 
@@ -140,28 +144,32 @@ const normalizeMatch = (raw) => {
   const matchId = String(pick(raw, ['matchId', 'id', 'eventId'], ''));
   const minute  = String(pick(raw, ['minute', 'clock.minute', 'live.minute', 'match.minute'], ''));
 
+  const ymd     = String(pick(raw, ['date','ymd','match.date','startDate','scheduledYmd'], ''));
+  const hhmm    = String(pick(raw, ['scheduledStart','startTime','match.scheduledStart'], ''));
+  const gmt     = String(pick(raw, ['gmt','stadiumGMT','match.gmt'], ''));
+
   return {
     matchId, scope,
     statusId, homeGoals, awayGoals, lineupsPublished,
-    homeTeamId, awayTeamId, homeName, awayName, minute
+    homeTeamId, awayTeamId, homeName, awayName, minute,
+    ymd, hhmm, gmt
   };
 };
 
-
-// Construye deeplink/tab por evento
+// Pestaña correcta para tu app (con espacio)
 const tabForEvent = (evt) => {
   switch (evt) {
     case 'LINEUPS': return 'alineaciones';
-    case 'START':   return 'en_vivo';
-    case 'HT':      return 'en_vivo';
-    case 'ST':      return 'en_vivo';
-    case 'END':     return 'resumen';
-    case 'GOAL':    return 'en_vivo';
-    default:        return 'resumen';
+    case 'START':   return 'en vivo';
+    case 'HT':      return 'detalles';
+    case 'ST':      return 'en vivo';
+    case 'END':     return 'detalles';
+    case 'GOAL':    return 'en vivo';
+    default:        return 'detalles';
   }
 };
 
-// Mensajes bonitos
+// Títulos y cuerpos
 const titleFor = (evt, m) => {
   switch (evt) {
     case 'LINEUPS': return `Alineaciones: ${m.homeName} vs ${m.awayName}`;
@@ -204,9 +212,8 @@ const loadMatchIds = async () => {
   if (FEED_LIST_URL) {
     try {
       const data = await fetchJson(FEED_LIST_URL);
-      // Adapta según tu feed: aceptar [123,456] o [{matchId:123},...]
       const ids = Array.isArray(data)
-        ? data.map(x => (typeof x === 'object' ? x.matchId ?? x.id : x))
+        ? data.map(x => (typeof x === 'object' ? (x.matchId ?? x.id) : x))
         : [];
       return ids.filter(Boolean).map(String);
     } catch (e) {
@@ -224,16 +231,22 @@ const handleEvent = async (evt, m) => {
     LEGACY_TOPIC || null
   ];
   const notification = { title: titleFor(evt, m), body: bodyFor(evt, m) };
+
+  // Deep-link alineado a tu app
   const data = {
-    screen: 'match',
+    screen: 'Match',
     tab: tabForEvent(evt),
     matchId: String(m.matchId),
-    scope: m.scope || SCOPE_DEFAULT,
+    channel: m.scope || SCOPE_DEFAULT,
     event: evt,
     statusId: String(m.statusId),
     homeGoals: String(m.homeGoals),
     awayGoals: String(m.awayGoals)
   };
+  if (m.ymd)  data.ymd  = m.ymd;
+  if (m.hhmm) data.hhmm = m.hhmm;
+  if (m.gmt)  data.gmt  = m.gmt;
+
   await sendToTopics(topics, notification, data);
 };
 
@@ -247,31 +260,30 @@ const tickMatch = async (matchId) => {
     return;
   }
   const m = normalizeMatch(raw);
-  console.log('[debug]', m.matchId || id, 'status=', m.statusId, 'score=', m.homeGoals + '-' + m.awayGoals, 'lineups=', m.lineupsPublished, 'names=', m.homeName, 'vs', m.awayName);
-
   if (!m.matchId) m.matchId = String(matchId); // respaldo
+
+  // debug visible
+  console.log('[debug]', m.matchId, 'status=', m.statusId, 'score=', `${m.homeGoals}-${m.awayGoals}`, 'lineups=', m.lineupsPublished, '|', m.homeName, 'vs', m.awayName);
 
   const prev = last.get(m.matchId);
   if (!prev) {
     last.set(m.matchId, { ...m });
     console.log('[state] init', m.matchId, m.homeName, 'vs', m.awayName);
-    // Si quieres notificar al arrancar, podrías enviar un "init" aquí.
     return;
   }
 
   // --- Eventos ---
-  // Alineaciones
   if (!prev.lineupsPublished && m.lineupsPublished) {
     await handleEvent('LINEUPS', m);
   }
-  // Cambios de estado relevantes
+
   if (prev.statusId !== m.statusId) {
     if (prev.statusId === 0 && m.statusId === 1) await handleEvent('START', m);
     if (m.statusId === 5) await handleEvent('HT', m);   // Entretiempo
     if (m.statusId === 6) await handleEvent('ST', m);   // Segundo tiempo
     if (m.statusId === 2) await handleEvent('END', m);  // Final
   }
-  // Goles
+
   if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
     await handleEvent('GOAL', m);
   }
@@ -280,12 +292,11 @@ const tickMatch = async (matchId) => {
 };
 
 const loop = async () => {
-  // Envío de prueba al arrancar (opcional)
   if (SEND_TEST_ON_BOOT) {
     await sendToTopics(
       [LEGACY_TOPIC].filter(Boolean),
       { title: 'Watcher OK', body: 'Arrancó correctamente.' },
-      { screen: 'home', tab: 'home' }
+      { screen: 'Match', tab: 'detalles' }
     );
   }
 
@@ -296,7 +307,6 @@ const loop = async () => {
 
   while (true) {
     try {
-      // refresca lista de ids si usas FEED_LIST_URL
       if (FEED_LIST_URL) ids = await loadMatchIds();
       await Promise.all(ids.map(id => tickMatch(id)));
     } catch (e) {
@@ -308,4 +318,3 @@ const loop = async () => {
 
 loop().catch(e => console.error('[fatal]', e));
 process.on('SIGTERM', () => { console.log('[watcher] apagando…'); process.exit(0); });
-

@@ -17,6 +17,18 @@ const SEND_TEST_ON_BOOT = process.env.SEND_TEST_ON_BOOT === '1';
 const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
 const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
 
+const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
+const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
+
+const ENABLE_NEWS_TOPIC   = process.env.ENABLE_NEWS_TOPIC === '1';
+const NEWS_TOPIC          = process.env.NEWS_TOPIC || 'news_guatemala';
+const NEWS_EVENTS         = (process.env.NEWS_EVENTS || 'START,END')
+  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+
+// opcional: limitar el general solo a ciertos equipos
+const NEWS_ONLY_TEAM_IDS  = (process.env.NEWS_ONLY_TEAM_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 
 // ➕ minutos antes del inicio para PRE30 (puedes cambiar a 1 para probar rápido)
 const PRE_PUSH_MIN = Number(process.env.PRE_PUSH_MIN || 30);
@@ -209,31 +221,41 @@ const tabForEvent = (evt) => {
   }
 };
 
-// Títulos / cuerpos
-const titleFor = (evt, m) => {
+// ===== Copy =====
+const teamPair = (m) => `${m.homeName} vs ${m.awayName}`;
+const pairWithScore = (m) => `${m.homeName} (${m.homeGoals}) vs ${m.awayName} (${m.awayGoals})`;
+
+const titleFor = (evt, m, extra = {}) => {
   switch (evt) {
-    case 'LINEUPS': return `Alineaciones: ${m.homeName} vs ${m.awayName}`;
-    case 'PRE30':   return `Arranca en ${PRE_PUSH_MIN} min: ${m.homeName} vs ${m.awayName}`;
-    case 'START':   return `¡Arranca! ${m.homeName} vs ${m.awayName}`;
-    case 'HT':      return `Entretiempo: ${m.homeGoals}-${m.awayGoals}`;
-    case 'ST':      return `Segundo tiempo en juego`;
-    case 'END':     return `Final: ${m.homeName} ${m.homeGoals}-${m.awayGoals} ${m.awayName}`;
-    case 'GOAL':    return `¡GOL! ${m.homeGoals}-${m.awayGoals}`;
-    default:        return `${m.homeName} vs ${m.awayName}`;
+    case 'LINEUPS': return 'Lineups: Alineaciones confirmadas';
+    case 'PRE30':   return teamPair(m);
+    case 'START':   return 'Inicia el partido';
+    case 'HT':      return 'Termina el primer tiempo';
+    case 'ST':      return 'Inicia el segundo tiempo';
+    case 'END':     return 'Termina el partido';
+    case 'GOAL': {
+      const scorer =
+        extra.scorer === 'home' ? m.homeName :
+        extra.scorer === 'away' ? m.awayName : '';
+      return scorer ? `¡Goooool! de ${scorer}` : '¡Goooool!';
+    }
+    default:        return teamPair(m);
   }
 };
+
 const bodyFor = (evt, m) => {
   switch (evt) {
-    case 'LINEUPS': return 'Formaciones confirmadas. Toca para ver el 11.';
-    case 'PRE30':   return m.hhmm ? `Hoy ${m.hhmm} (${m.gmt || 'GMT'})` : 'Faltan 30 minutos.';
-    case 'START':   return 'Sigue el minuto a minuto en la app.';
-    case 'HT':      return 'Entretiempo (statusId 5).';
-    case 'ST':      return 'Comienza el segundo tiempo.';
-    case 'END':     return 'Mira el resumen y estadísticas.';
-    case 'GOAL':    return `Min ${m.minute || ''} | ${m.homeName} ${m.homeGoals}-${m.awayGoals} ${m.awayName}`;
+    case 'LINEUPS': return `${teamPair(m)}. Toca para ver el 11 inicial`;
+    case 'PRE30':   return 'El partido comenzará en 30 minutos';
+    case 'START':   return `${teamPair(m)}. Toca para ver el minuto a minuto`;
+    case 'HT':      return pairWithScore(m);
+    case 'ST':      return pairWithScore(m);
+    case 'END':     return pairWithScore(m);
+    case 'GOAL':    return pairWithScore(m);
     default:        return '';
   }
 };
+
 
 // ===== 5) Core =====
 const fetchJson = async (url) => {
@@ -279,22 +301,30 @@ const handleEvent = async (evt, m) => {
   if (m.hhmm) data.hhmm = m.hhmm;
   if (m.gmt)  data.gmt  = m.gmt;
 
-  // --- Condition "match OR team(s)" para evitar duplicados ---
+  // --- Condition "match OR team(s) OR (news si aplica)" ---
   const parts = [];
   if (ENABLE_MATCH_TOPICS) parts.push(`'${TOPIC_PREFIX}${m.matchId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.homeTeamId) parts.push(`'${TEAM_PREFIX}${m.homeTeamId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.awayTeamId) parts.push(`'${TEAM_PREFIX}${m.awayTeamId}' in topics`);
+
+  // sumar 'news' SOLO para los eventos configurados (por defecto START y END)
+  if (ENABLE_NEWS_TOPIC && NEWS_EVENTS.includes(evt)) {
+    const newsAllowed =
+      NEWS_ONLY_TEAM_IDS.length === 0 ||
+      NEWS_ONLY_TEAM_IDS.includes(String(m.homeTeamId)) ||
+      NEWS_ONLY_TEAM_IDS.includes(String(m.awayTeamId));
+    if (newsAllowed) parts.push(`'${NEWS_TOPIC}' in topics`);
+  }
 
   if (parts.length) {
     const condition = parts.join(' || ');
     await sendCondition(condition, notification, data);
   }
 
-  // (Opcional) Legacy aparte si lo tienes activo
-  if (LEGACY_TOPIC) {
-    await sendToTopics([LEGACY_TOPIC], notification, data);
-  }
+  // sin legacy; si algún día lo reactivas, puedes mandar aparte:
+  // if (LEGACY_TOPIC) await sendToTopics([LEGACY_TOPIC], notification, data);
 };
+
 
 
 const last = new Map();

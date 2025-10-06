@@ -223,7 +223,7 @@ const tabForEvent = (evt) => {
 
 // ===== Copy =====
 const teamPair = (m) => `${m.homeName} vs ${m.awayName}`;
-const pairWithScore = (m) => `${m.homeName} (${m.homeGoals}) vs ${m.awayName} (${m.awayGoals})`;
+const pairWithScore = (m) => `${m.homeName} ${m.homeGoals} - ${m.awayGoals} ${m.awayName}`;
 
 const titleFor = (evt, m, extra = {}) => {
   switch (evt) {
@@ -284,8 +284,8 @@ const loadMatchIds = async () => {
   return MATCH_IDS;
 };
 
-const handleEvent = async (evt, m) => {
-  const notification = { title: titleFor(evt, m), body: bodyFor(evt, m) };
+const handleEvent = async (evt, m, extra = {}) => {
+  const notification = { title: titleFor(evt, m, extra), body: bodyFor(evt, m) };
 
   const data = {
     screen: 'Match',
@@ -375,11 +375,12 @@ const tickMatch = async (matchId) => {
     if (m.statusId === 2) { const key = sentKey(m, 'end'); if (!(await wasSent(key))) { await handleEvent('END', m); await markSent(key); } }
   }
 
-  // Gol (único por marcador)
-  if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
-    const key = sentKey(m, `score-${m.homeGoals}-${m.awayGoals}`);
-    if (!(await wasSent(key))) { await handleEvent('GOAL', m); await markSent(key); }
-  }
+  // Gol
+if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
+  const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
+  await handleEvent('GOAL', m, extra);
+}
+
 
   last.set(m.matchId, { ...m });
 };

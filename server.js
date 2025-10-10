@@ -451,7 +451,7 @@ if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
 }
 
 last.set(m.matchId, { ...m });
-
+};
 
 loop().catch(e => console.error('[fatal]', e));
 process.on('SIGTERM', () => { console.log('[watcher] apagando…'); process.exit(0); });

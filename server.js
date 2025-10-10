@@ -381,18 +381,18 @@ const tickMatch = async ({ id: matchId, scope: scopeHint }) => {
               'lineups=', m.lineupsPublished, '|', m.homeName, 'vs', m.awayName,
               '| ids=', m.homeTeamId, m.awayTeamId, '| scope=', m.scope);
 
-  // PRE30
-  const startUtc = parseStartUtc(m);
-  if (startUtc) {
-    const diffMs = startUtc - Date.now();
-    if (diffMs > 0 && diffMs <= PRE_PUSH_MIN * 60000) {
-      const key = sentKey(m, `pre${PRE_PUSH_MIN}`);
-      if (!(await wasSent(key))) {
-        await handleEvent('PRE30', m);
-        await markSent(key);
-      }
+  // PRE30 (versión atómica)
+const startUtc = parseStartUtc(m);
+if (startUtc) {
+  const diffMs = startUtc - Date.now();
+  if (diffMs > 0 && diffMs <= PRE_PUSH_MIN * 60000) {
+    const key = sentKey(m, `pre${PRE_PUSH_MIN}`);
+    if (await tryMarkOnce(key)) {
+      await handleEvent('PRE30', m);
     }
   }
+}
+
 
   const prev = last.get(m.matchId);
   if (!prev) { last.set(m.matchId, { ...m }); console.log('[state] init', m.matchId, m.homeName, 'vs', m.awayName); return; }

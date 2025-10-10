@@ -269,20 +269,62 @@ const getMatchUrl = (id) => {
   const sep = base.includes('?') ? '&' : '?';
   return `${base}${sep}cb=${Date.now()}`; // anti-cache
 };
-const loadMatchIds = async () => {
+const loadMatchList = async () => {
   if (FEED_LIST_URL) {
     try {
-      const data = await fetchJson(FEED_LIST_URL);
-      const ids = Array.isArray(data)
-        ? data.map(x => (typeof x === 'object' ? (x.matchId ?? x.id) : x))
-        : [];
-      return ids.filter(Boolean).map(String);
+      const data = await fetchJson(`${FEED_LIST_URL}?cb=${Date.now()}`);
+
+      // A) Si viene como array: [id] o [{id,scope}]
+      if (Array.isArray(data)) {
+        return data.map(x => {
+          if (typeof x === 'object' && x) {
+            const id = String(x.matchId ?? x.id ?? x.eventId ?? '');
+            const scope = String(x.scope ?? x.channel ?? SCOPE_DEFAULT).toLowerCase().trim();
+            return id ? { id, scope } : null;
+          }
+          const id = String(x);
+          return id ? { id, scope: SCOPE_DEFAULT } : null;
+        }).filter(Boolean);
+      }
+
+      // B) Si viene como objeto con `events` tipo home-week.json
+      if (data && data.events && typeof data.events === 'object') {
+        const out = [];
+        for (const key of Object.keys(data.events)) {
+          // ejemplo de key: "deportes.futbol.guatemala.784685"
+          const parts = key.split('.');
+          const id = parts[parts.length - 1];
+          // scope es la parte después de "futbol."
+          const idx = parts.indexOf('futbol');
+          const scope = (idx >= 0 && parts[idx + 1]) ? parts[idx + 1] : SCOPE_DEFAULT;
+          if (id) out.push({ id: String(id), scope: String(scope).toLowerCase().trim() });
+        }
+        // quitar duplicados por id
+        const seen = new Set();
+        return out.filter(it => (seen.has(it.id) ? false : seen.add(it.id)));
+      }
+
     } catch (e) {
       console.error('[ids] error FEED_LIST_URL', e.message);
     }
   }
-  return MATCH_IDS;
+
+  // Fallbacks (si algún día los usas)
+  const MIX = (process.env.MATCH_IDS_WITH_SCOPE || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (MIX.length) {
+    return MIX.map(item => {
+      const [id, sc] = item.split(':').map(s => s.trim());
+      return id ? { id: String(id), scope: (sc || SCOPE_DEFAULT).toLowerCase().trim() } : null;
+    }).filter(Boolean);
+  }
+  const IDS = (process.env.MATCH_IDS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (IDS.length) return IDS.map(id => ({ id: String(id), scope: SCOPE_DEFAULT }));
+
+  return [];
 };
+
 
 const handleEvent = async (evt, m, extra = {}) => {
   const notification = { title: titleFor(evt, m, extra), body: bodyFor(evt, m) };

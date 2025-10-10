@@ -65,15 +65,24 @@ try {
 
 // Helpers con fallback a memoria si Redis falla
 const sentKey = (m, tag) => `sent:${m.matchId}:${tag}`;
-const wasSent = async (key) => {
-  if (!redis) return mem.has(key);
-  try { return (await redis.get(key)) === '1'; }
-  catch { return mem.has(key); }
-};
-const markSent = async (key, ttlSec = 36 * 3600) => {
-  if (!redis) { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); return; }
-  try { await redis.set(key, '1', 'EX', ttlSec); }
-  catch { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); }
+
+// Bloqueo atómico: sólo un proceso gana (usa Redis SET NX)
+const tryMarkOnce = async (key, ttlSec = 36 * 3600) => {
+  if (!redis) {
+    if (mem.has(key)) return false;
+    mem.add(key);
+    setTimeout(() => mem.delete(key), ttlSec * 1000);
+    return true;
+  }
+  try {
+    const ok = await redis.set(key, '1', 'NX', 'EX', ttlSec);
+    return ok === 'OK';
+  } catch {
+    if (mem.has(key)) return false;
+    mem.add(key);
+    setTimeout(() => mem.delete(key), ttlSec * 1000);
+    return true;
+  }
 };
 
 // ===== 4) Utils =====

@@ -398,55 +398,60 @@ if (startUtc) {
   if (!prev) { last.set(m.matchId, { ...m }); console.log('[state] init', m.matchId, m.homeName, 'vs', m.awayName); return; }
 
   // Alineaciones
-  if (!prev.lineupsPublished && m.lineupsPublished) {
-    const key = sentKey(m, 'lineups');
-    if (!(await wasSent(key))) { await handleEvent('LINEUPS', m); await markSent(key); }
+if (!prev.lineupsPublished && m.lineupsPublished) {
+  const key = sentKey(m, 'lineups');
+  if (await tryMarkOnce(key)) {
+    await handleEvent('LINEUPS', m);
   }
+}
 
-  // Estados
-  if (prev.statusId !== m.statusId) {
-    if (prev.statusId === 0 && m.statusId === 1) {
-      const key = sentKey(m, 'start'); if (!(await wasSent(key))) { await handleEvent('START', m); await markSent(key); }
-    }
-    if (m.statusId === 5) { const key = sentKey(m, 'ht'); if (!(await wasSent(key))) { await handleEvent('HT', m); await markSent(key); } }
-    if (m.statusId === 6) { const key = sentKey(m, 'st'); if (!(await wasSent(key))) { await handleEvent('ST', m); await markSent(key); } }
-    if (m.statusId === 2) { const key = sentKey(m, 'end'); if (!(await wasSent(key))) { await handleEvent('END', m); await markSent(key); } }
-  }
-
-  // Gol (idempotencia por marcador)
-  if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
-    const tag = `goal:${m.homeGoals}-${m.awayGoals}`;
-    const key = sentKey(m, tag);
-    if (!(await wasSent(key))) {
-      const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
-      await handleEvent('GOAL', m, extra);
-      await markSent(key, 24 * 3600);
+// Estados
+if (prev.statusId !== m.statusId) {
+  // Inicio del partido
+  if (prev.statusId === 0 && m.statusId === 1) {
+    const key = sentKey(m, 'start');
+    if (await tryMarkOnce(key)) {
+      await handleEvent('START', m);
     }
   }
 
-  last.set(m.matchId, { ...m });
-};
-
-const loop = async () => {
-  if (SEND_TEST_ON_BOOT) {
-    await sendToTopics([LEGACY_TOPIC].filter(Boolean),
-      { title: 'Watcher OK', body: 'Arrancó correctamente.' },
-      { screen: 'Match', tab: 'detalles' });
-  }
-
-  let list = await loadMatchList();
-  if (!list.length) console.warn('⚠️ No hay partidos (FEED_LIST_URL vacío o sin eventos).');
-
-  while (true) {
-    try {
-      if (FEED_LIST_URL) list = await loadMatchList(); // refresca cada ciclo
-      await Promise.all(list.map(item => tickMatch(item)));
-    } catch (e) {
-      console.error('[loop] error', e.message);
+  // Entretiempo
+  if (m.statusId === 5) {
+    const key = sentKey(m, 'ht');
+    if (await tryMarkOnce(key)) {
+      await handleEvent('HT', m);
     }
-    await sleep(POLL_MS);
   }
-};
+
+  // Segundo tiempo
+  if (m.statusId === 6) {
+    const key = sentKey(m, 'st');
+    if (await tryMarkOnce(key)) {
+      await handleEvent('ST', m);
+    }
+  }
+
+  // Final del partido
+  if (m.statusId === 2) {
+    const key = sentKey(m, 'end');
+    if (await tryMarkOnce(key)) {
+      await handleEvent('END', m);
+    }
+  }
+}
+
+// Gol (idempotencia por marcador)
+if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
+  const tag = `goal:${m.homeGoals}-${m.awayGoals}`;
+  const key = sentKey(m, tag);
+  if (await tryMarkOnce(key, 24 * 3600)) {
+    const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
+    await handleEvent('GOAL', m, extra);
+  }
+}
+
+last.set(m.matchId, { ...m });
+
 
 loop().catch(e => console.error('[fatal]', e));
 process.on('SIGTERM', () => { console.log('[watcher] apagando…'); process.exit(0); });

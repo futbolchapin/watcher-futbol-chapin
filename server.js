@@ -1,11 +1,11 @@
-// watcher-futbol-chapin – FCM HTTP v1 + PRE30 + Redis idempotente
+// watcher-futbol-chapin – FCM HTTP v1 + PRE30 + Redis idempotente + lista desde home-week.json
 
 console.log('[watcher] iniciado');
 
 // ===== 1) Config =====
 const POLL_MS = Number(process.env.POLL_MS || 15000);
 const FEED_TMPL = process.env.FEED_TMPL || '';
-const FEED_LIST_URL = process.env.FEED_LIST_URL || '';
+const FEED_LIST_URL = process.env.FEED_LIST_URL || ''; // ej: https://futbolchapin.net/edit/home-week.json
 const MATCH_IDS = (process.env.MATCH_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 const SCOPE_DEFAULT = process.env.SCOPE_DEFAULT || 'guatemala';
@@ -13,9 +13,6 @@ const TOPIC_PREFIX = process.env.TOPIC_PREFIX || 'match_';
 const TEAM_PREFIX  = process.env.TEAM_PREFIX  || 'team_';
 const LEGACY_TOPIC = process.env.LEGACY_TOPIC || '';
 const SEND_TEST_ON_BOOT = process.env.SEND_TEST_ON_BOOT === '1';
-
-const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
-const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
 
 const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
 const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
@@ -28,7 +25,6 @@ const NEWS_EVENTS         = (process.env.NEWS_EVENTS || 'START,END')
 // opcional: limitar el general solo a ciertos equipos
 const NEWS_ONLY_TEAM_IDS  = (process.env.NEWS_ONLY_TEAM_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-
 
 // ➕ minutos antes del inicio para PRE30 (puedes cambiar a 1 para probar rápido)
 const PRE_PUSH_MIN = Number(process.env.PRE_PUSH_MIN || 30);
@@ -55,9 +51,7 @@ try {
     const isTls = url.startsWith('rediss://');
 
     redis = new IORedis(url, {
-      // Aceptar cert self-signed del add-on cuando usa TLS
       ...(isTls ? { tls: { rejectUnauthorized: false } } : {}),
-      // Evitar que ioredis reintente eternamente y corte el loop
       maxRetriesPerRequest: 1,
       enableReadyCheck: false,
     });
@@ -81,7 +75,6 @@ const markSent = async (key, ttlSec = 36 * 3600) => {
   try { await redis.set(key, '1', 'EX', ttlSec); }
   catch { mem.add(key); setTimeout(() => mem.delete(key), ttlSec * 1000); }
 };
-
 
 // ===== 4) Utils =====
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -119,7 +112,6 @@ const sendCondition = async (condition, notification, data = {}) => {
     console.error('[push] error', condition, e.message);
   }
 };
-
 
 const pick = (obj, keys, dflt = undefined) => {
   for (const k of keys) {
@@ -184,10 +176,11 @@ const normalizeMatch = (raw) => {
 
   // fechas para pre-partido
   const matchId = String(m.matchId ?? raw.matchId ?? raw.id ?? raw.eventId ?? '');
-  const scope   = String(m.channel ?? raw.channel ?? raw.scope ?? SCOPE_DEFAULT);
+  let scope   = String(m.channel ?? raw.channel ?? raw.scope ?? '').toLowerCase().trim();
+  if (!scope) scope = SCOPE_DEFAULT;
+
   const ymd     = String(m.date ?? raw.date ?? '');
   const hhmm    = String((m.scheduledStart ?? raw.scheduledStart ?? '').toString().slice(0,5)); // HH:MM
-  // Preferimos stadiumGMT si existe (más confiable para sede)
   const gmt     = String(m.stadiumGMT ?? raw.stadiumGMT ?? m.gmt ?? raw.gmt ?? '');
 
   const lineupsPublished = toBool(st.lineUpConfirmed ?? raw.lineUpConfirmed ?? pick(raw, ['lineups.home.length'], false));
@@ -256,19 +249,23 @@ const bodyFor = (evt, m) => {
   }
 };
 
-
 // ===== 5) Core =====
 const fetchJson = async (url) => {
   const res = await fetch(url, { headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };
-const getMatchUrl = (id) => {
+
+// Ahora soporta {scope} y {id}
+const getMatchUrl = (id, scope = SCOPE_DEFAULT) => {
   if (!FEED_TMPL.includes('{id}')) throw new Error('FEED_TMPL debe contener {id}');
-  const base = FEED_TMPL.replace('{id}', String(id));
+  let base = FEED_TMPL.replace('{id}', String(id));
+  base = base.replace('{scope}', String(scope || SCOPE_DEFAULT));
   const sep = base.includes('?') ? '&' : '?';
   return `${base}${sep}cb=${Date.now()}`; // anti-cache
 };
+
+// Lee IDs desde FEED_LIST_URL (home-week.json) o fallbacks
 const loadMatchList = async () => {
   if (FEED_LIST_URL) {
     try {
@@ -287,14 +284,13 @@ const loadMatchList = async () => {
         }).filter(Boolean);
       }
 
-      // B) Si viene como objeto con `events` tipo home-week.json
+      // B) Objeto con `events` (formato home-week.json)
       if (data && data.events && typeof data.events === 'object') {
         const out = [];
         for (const key of Object.keys(data.events)) {
-          // ejemplo de key: "deportes.futbol.guatemala.784685"
+          // ej: "deportes.futbol.guatemala.784685"
           const parts = key.split('.');
           const id = parts[parts.length - 1];
-          // scope es la parte después de "futbol."
           const idx = parts.indexOf('futbol');
           const scope = (idx >= 0 && parts[idx + 1]) ? parts[idx + 1] : SCOPE_DEFAULT;
           if (id) out.push({ id: String(id), scope: String(scope).toLowerCase().trim() });
@@ -318,13 +314,10 @@ const loadMatchList = async () => {
       return id ? { id: String(id), scope: (sc || SCOPE_DEFAULT).toLowerCase().trim() } : null;
     }).filter(Boolean);
   }
-  const IDS = (process.env.MATCH_IDS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-  if (IDS.length) return IDS.map(id => ({ id: String(id), scope: SCOPE_DEFAULT }));
+  if (MATCH_IDS.length) return MATCH_IDS.map(id => ({ id: String(id), scope: SCOPE_DEFAULT }));
 
   return [];
 };
-
 
 const handleEvent = async (evt, m, extra = {}) => {
   const notification = { title: titleFor(evt, m, extra), body: bodyFor(evt, m) };
@@ -343,13 +336,11 @@ const handleEvent = async (evt, m, extra = {}) => {
   if (m.hhmm) data.hhmm = m.hhmm;
   if (m.gmt)  data.gmt  = m.gmt;
 
-  // --- Condition "match OR team(s) OR (news si aplica)" ---
   const parts = [];
   if (ENABLE_MATCH_TOPICS) parts.push(`'${TOPIC_PREFIX}${m.matchId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.homeTeamId) parts.push(`'${TEAM_PREFIX}${m.homeTeamId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.awayTeamId) parts.push(`'${TEAM_PREFIX}${m.awayTeamId}' in topics`);
 
-  // sumar 'news' SOLO para los eventos configurados (por defecto START y END)
   if (ENABLE_NEWS_TOPIC && NEWS_EVENTS.includes(evt)) {
     const newsAllowed =
       NEWS_ONLY_TEAM_IDS.length === 0 ||
@@ -362,28 +353,24 @@ const handleEvent = async (evt, m, extra = {}) => {
     const condition = parts.join(' || ');
     await sendCondition(condition, notification, data);
   }
-
-  // sin legacy; si algún día lo reactivas, puedes mandar aparte:
-  // if (LEGACY_TOPIC) await sendToTopics([LEGACY_TOPIC], notification, data);
 };
-
-
 
 const last = new Map();
 
-const tickMatch = async (matchId) => {
-  const url = getMatchUrl(matchId);
+const tickMatch = async ({ id: matchId, scope: scopeHint }) => {
+  const url = getMatchUrl(matchId, scopeHint);
   let raw;
   try { raw = await fetchJson(url); }
   catch (e) { console.error('[fetch]', matchId, e.message); return; }
 
   const m = normalizeMatch(raw);
   if (!m.matchId) m.matchId = String(matchId);
+  if (!m.scope) m.scope = scopeHint || SCOPE_DEFAULT;
 
   // debug
   console.log('[debug]', m.matchId, 'status=', m.statusId, 'score=', `${m.homeGoals}-${m.awayGoals}`,
               'lineups=', m.lineupsPublished, '|', m.homeName, 'vs', m.awayName,
-              '| ids=', m.homeTeamId, m.awayTeamId);
+              '| ids=', m.homeTeamId, m.awayTeamId, '| scope=', m.scope);
 
   // PRE30
   const startUtc = parseStartUtc(m);
@@ -417,12 +404,16 @@ const tickMatch = async (matchId) => {
     if (m.statusId === 2) { const key = sentKey(m, 'end'); if (!(await wasSent(key))) { await handleEvent('END', m); await markSent(key); } }
   }
 
-  // Gol
-if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
-  const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
-  await handleEvent('GOAL', m, extra);
-}
-
+  // Gol (idempotencia por marcador)
+  if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
+    const tag = `goal:${m.homeGoals}-${m.awayGoals}`;
+    const key = sentKey(m, tag);
+    if (!(await wasSent(key))) {
+      const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
+      await handleEvent('GOAL', m, extra);
+      await markSent(key, 24 * 3600);
+    }
+  }
 
   last.set(m.matchId, { ...m });
 };
@@ -434,13 +425,13 @@ const loop = async () => {
       { screen: 'Match', tab: 'detalles' });
   }
 
-  let ids = await loadMatchIds();
-  if (!ids.length) console.warn('⚠️ No hay MATCH_IDS ni FEED_LIST_URL con ids válidos.');
+  let list = await loadMatchList();
+  if (!list.length) console.warn('⚠️ No hay partidos (FEED_LIST_URL vacío o sin eventos).');
 
   while (true) {
     try {
-      if (FEED_LIST_URL) ids = await loadMatchIds();
-      await Promise.all(ids.map(id => tickMatch(id)));
+      if (FEED_LIST_URL) list = await loadMatchList(); // refresca cada ciclo
+      await Promise.all(list.map(item => tickMatch(item)));
     } catch (e) {
       console.error('[loop] error', e.message);
     }

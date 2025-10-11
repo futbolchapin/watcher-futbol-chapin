@@ -1,6 +1,7 @@
 // watcher-futbol-chapin – FCM HTTP v1 + PRE30 + Redis idempotente + lista desde home-week.json
 
-console.log('[watcher] iniciado');
+const WATCHER_ID = process.env.WATCHER_ID || Math.random().toString(36).slice(2, 8);
+console.log(`[watcher ${WATCHER_ID}] iniciado`);
 
 // ===== 1) Config =====
 const POLL_MS = Number(process.env.POLL_MS || 15000);
@@ -16,17 +17,14 @@ const SEND_TEST_ON_BOOT = process.env.SEND_TEST_ON_BOOT === '1';
 
 const ENABLE_MATCH_TOPICS = process.env.ENABLE_MATCH_TOPICS !== '0';
 const ENABLE_TEAM_TOPICS  = process.env.ENABLE_TEAM_TOPICS  !== '0';
-
 const ENABLE_NEWS_TOPIC   = process.env.ENABLE_NEWS_TOPIC === '1';
 const NEWS_TOPIC          = process.env.NEWS_TOPIC || 'news_guatemala';
 const NEWS_EVENTS         = (process.env.NEWS_EVENTS || 'START,END')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 
-// opcional: limitar el general solo a ciertos equipos
 const NEWS_ONLY_TEAM_IDS  = (process.env.NEWS_ONLY_TEAM_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-// ➕ minutos antes del inicio para PRE30 (puedes cambiar a 1 para probar rápido)
 const PRE_PUSH_MIN = Number(process.env.PRE_PUSH_MIN || 30);
 
 // ===== 2) Firebase =====
@@ -57,16 +55,15 @@ try {
     });
 
     redis.on('connect', () => console.log('[redis] connect ok'));
-    redis.on('error',   (e) => console.error('[redis] error', e.message));
+    redis.on('error', (e) => console.error('[redis] error', e.message));
   }
 } catch (e) {
   console.warn('[redis] no disponible', e.message);
 }
 
-// Helpers con fallback a memoria si Redis falla
 const sentKey = (m, tag) => `sent:${m.matchId}:${tag}`;
 
-// Bloqueo atómico: sólo un proceso gana (usa Redis SET NX)
+// Bloqueo atómico: sólo un proceso gana (Redis SET NX)
 const tryMarkOnce = async (key, ttlSec = 36 * 3600) => {
   if (!redis) {
     if (mem.has(key)) return false;
@@ -88,37 +85,19 @@ const tryMarkOnce = async (key, ttlSec = 36 * 3600) => {
 // ===== 4) Utils =====
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-const sendToTopics = async (topics, notification, data = {}) => {
-  const messages = topics.filter(Boolean).map(topic => ({
-    topic,
-    notification,
-    data: Object.fromEntries(Object.entries(data).map(([k,v]) => [k, String(v)])),
-    android: { priority: 'high' },
-    apns: { headers: { 'apns-priority': '10' } }
-  }));
-  for (const msg of messages) {
-    try {
-      const id = await admin.messaging().send(msg);
-      console.log('[push] ok', msg.topic, id, notification.title);
-    } catch (e) {
-      console.error('[push] error', msg.topic, e.message);
-    }
-  }
-};
-
 const sendCondition = async (condition, notification, data = {}) => {
   const message = {
     condition,
     notification,
     data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
     android: { priority: 'high' },
-    apns: { headers: { 'apns-priority': '10' } }
+    apns: { headers: { 'apns-priority': '10' } },
   };
   try {
     const id = await admin.messaging().send(message);
-    console.log('[push] ok', condition, id, notification.title);
+    console.log('[push]', WATCHER_ID, 'ok', condition, id, notification.title);
   } catch (e) {
-    console.error('[push] error', condition, e.message);
+    console.error('[push]', WATCHER_ID, 'error', condition, e.message);
   }
 };
 
@@ -129,324 +108,203 @@ const pick = (obj, keys, dflt = undefined) => {
   }
   return dflt;
 };
-const toNum = (v, d = 0) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-};
-const toBool = (v) => {
-  if (v === true || v === 'true' || v === 1 || v === '1') return true;
-  if (Array.isArray(v)) return v.length > 0;
-  return !!v;
-};
+const toNum = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+const toBool = (v) => (v === true || v === 'true' || v === 1 || v === '1' || (Array.isArray(v) && v.length > 0));
 const parseOffsetMin = (val) => {
-  if (val === undefined || val === null) return 0;
+  if (!val) return 0;
   const s = String(val).trim();
   if (s.includes(':')) {
     const m = s.match(/^([+-])?(\d{1,2}):?(\d{2})$/);
-    if (m) { const sign = m[1] === '-' ? -1 : 1; return sign * (Number(m[2]) * 60 + Number(m[3] || '0')); }
+    if (m) {
+      const sign = m[1] === '-' ? -1 : 1;
+      return sign * (Number(m[2]) * 60 + Number(m[3] || '0'));
+    }
   }
   const n = Number(s);
   return Number.isFinite(n) ? n * 60 : 0;
 };
 
-// Normaliza tu JSON (usa match.* y scoreStatus)
+// ===== 5) Normalización de datos =====
 const normalizeMatch = (raw) => {
-  const m  = raw.match || {};
+  const m = raw.match || {};
   const st = raw.status || {};
   const teamsMap = raw.teams || {};
 
-  const homeTeamId = String(m.homeTeamId ?? pick(raw, ['homeTeamId','home.id','teams.home.id'], ''));
-  const awayTeamId = String(m.awayTeamId ?? pick(raw, ['awayTeamId','away.id','teams.away.id'], ''));
-  let homeName = String(m.homeTeamName ?? '');
-  let awayName = String(m.awayTeamName ?? '');
-  if (!homeName && homeTeamId && teamsMap[homeTeamId]?.name) homeName = teamsMap[homeTeamId].name;
-  if (!awayName && awayTeamId && teamsMap[awayTeamId]?.name) awayName = teamsMap[awayTeamId].name;
-  if (!homeName) homeName = 'Local';
-  if (!awayName) awayName = 'Visitante';
+  const homeTeamId = String(m.homeTeamId ?? pick(raw, ['homeTeamId', 'home.id', 'teams.home.id'], ''));
+  const awayTeamId = String(m.awayTeamId ?? pick(raw, ['awayTeamId', 'away.id', 'teams.away.id'], ''));
+  let homeName = m.homeTeamName || teamsMap[homeTeamId]?.name || 'Local';
+  let awayName = m.awayTeamName || teamsMap[awayTeamId]?.name || 'Visitante';
 
   const statusId = toNum(st.statusId ?? raw.statusId, 0);
-  const minute   = String(pick(raw, ['minute','live.minute','match.minute'], ''));
+  const scoresObj = raw.scoreStatus || raw.scoresStatus || raw.scores || m.scores || null;
+  const readScore = (obj, id) => (obj?.[id]?.score ?? obj?.[id]?.goals ?? null);
 
-  const scoresObj =
-    raw.scoreStatus || raw.scoresStatus || raw.scores ||
-    m.scoreStatus   || m.scoresStatus   || m.scores    || null;
+  let homeGoals = toNum(readScore(scoresObj, homeTeamId) ?? pick(raw, ['summary.goals.homeQty'], 0));
+  let awayGoals = toNum(readScore(scoresObj, awayTeamId) ?? pick(raw, ['summary.goals.awayQty'], 0));
 
-  const readTeamScore = (obj, tid) => {
-    if (!obj || !tid) return null;
-    const key = String(tid);
-    const v = obj[key] ?? obj[Number(key)];
-    if (!v) return null;
-    return toNum(v.score ?? v.value ?? v.goals ?? v.goalsQty, null);
-  };
-  let homeGoals = readTeamScore(scoresObj, homeTeamId);
-  let awayGoals = readTeamScore(scoresObj, awayTeamId);
-  if (homeGoals == null) homeGoals = toNum(pick(raw, ['summary.goals.homeQty','homeGoals','homeScore','score.home'], 0));
-  if (awayGoals == null) awayGoals = toNum(pick(raw, ['summary.goals.awayQty','awayGoals','awayScore','score.away'], 0));
-
-  // fechas para pre-partido
   const matchId = String(m.matchId ?? raw.matchId ?? raw.id ?? raw.eventId ?? '');
-  let scope   = String(m.channel ?? raw.channel ?? raw.scope ?? '').toLowerCase().trim();
-  if (!scope) scope = SCOPE_DEFAULT;
-
-  const ymd     = String(m.date ?? raw.date ?? '');
-  const hhmm    = String((m.scheduledStart ?? raw.scheduledStart ?? '').toString().slice(0,5)); // HH:MM
-  const gmt     = String(m.stadiumGMT ?? raw.stadiumGMT ?? m.gmt ?? raw.gmt ?? '');
-
+  const scope = String(m.scope ?? raw.scope ?? SCOPE_DEFAULT).toLowerCase();
+  const ymd = String(m.date ?? raw.date ?? '');
+  const hhmm = String((m.scheduledStart ?? raw.scheduledStart ?? '').toString().slice(0, 5));
+  const gmt = String(m.gmt ?? raw.gmt ?? '');
   const lineupsPublished = toBool(st.lineUpConfirmed ?? raw.lineUpConfirmed ?? pick(raw, ['lineups.home.length'], false));
 
-  return { matchId, scope, statusId, homeGoals, awayGoals, lineupsPublished,
-           homeTeamId, awayTeamId, homeName, awayName, minute, ymd, hhmm, gmt };
+  return { matchId, scope, statusId, homeGoals, awayGoals, lineupsPublished, homeTeamId, awayTeamId, homeName, awayName, ymd, hhmm, gmt };
 };
 
 const parseStartUtc = (m) => {
   if (!m.ymd || !m.hhmm) return null;
-  const Y = Number(m.ymd.slice(0,4));
-  const M = Number(m.ymd.slice(4,6)) - 1;
-  const D = Number(m.ymd.slice(6,8));
   const [H, Mi] = m.hhmm.split(':').map(Number);
   const offsetMin = parseOffsetMin(m.gmt);
-  const localUtc = Date.UTC(Y, M, D, H, Mi);
-  return localUtc - offsetMin * 60000; // pasa de hora local (GMT offset) a UTC
+  return Date.UTC(+m.ymd.slice(0,4), +m.ymd.slice(4,6)-1, +m.ymd.slice(6,8), H, Mi) - offsetMin * 60000;
 };
 
-// Deeplink tab
 const tabForEvent = (evt) => {
   switch (evt) {
     case 'LINEUPS': return 'alineaciones';
-    case 'START':   return 'en vivo';
-    case 'HT':      return 'detalles';
-    case 'ST':      return 'en vivo';
-    case 'END':     return 'detalles';
-    case 'GOAL':    return 'en vivo';
-    case 'PRE30':   return 'detalles';
-    default:        return 'detalles';
+    case 'START': case 'ST': case 'GOAL': return 'en vivo';
+    case 'HT': case 'END': case 'PRE30': default: return 'detalles';
   }
 };
-
-// ===== Copy =====
 const teamPair = (m) => `${m.homeName} vs ${m.awayName}`;
 const pairWithScore = (m) => `${m.homeName} ${m.homeGoals} - ${m.awayGoals} ${m.awayName}`;
+const titleFor = (evt, m, extra = {}) => ({
+  LINEUPS: 'Lineups: Alineaciones confirmadas',
+  PRE30: teamPair(m),
+  START: 'Inicia el partido',
+  HT: 'Termina el primer tiempo',
+  ST: 'Inicia el segundo tiempo',
+  END: 'Termina el partido',
+  GOAL: extra.scorer ? `¡Goooool! de ${extra.scorer === 'home' ? m.homeName : m.awayName}` : '¡Goooool!',
+}[evt] || teamPair(m));
+const bodyFor = (evt, m) => ({
+  LINEUPS: `${teamPair(m)}. Toca para ver el 11 inicial`,
+  PRE30: 'El partido comenzará en 30 minutos',
+  START: `${teamPair(m)}. Toca para ver el minuto a minuto`,
+  HT: pairWithScore(m),
+  ST: pairWithScore(m),
+  END: pairWithScore(m),
+  GOAL: pairWithScore(m),
+}[evt] || '');
 
-const titleFor = (evt, m, extra = {}) => {
-  switch (evt) {
-    case 'LINEUPS': return 'Lineups: Alineaciones confirmadas';
-    case 'PRE30':   return teamPair(m);
-    case 'START':   return 'Inicia el partido';
-    case 'HT':      return 'Termina el primer tiempo';
-    case 'ST':      return 'Inicia el segundo tiempo';
-    case 'END':     return 'Termina el partido';
-    case 'GOAL': {
-      const scorer =
-        extra.scorer === 'home' ? m.homeName :
-        extra.scorer === 'away' ? m.awayName : '';
-      return scorer ? `¡Goooool! de ${scorer}` : '¡Goooool!';
-    }
-    default:        return teamPair(m);
-  }
-};
-
-const bodyFor = (evt, m) => {
-  switch (evt) {
-    case 'LINEUPS': return `${teamPair(m)}. Toca para ver el 11 inicial`;
-    case 'PRE30':   return 'El partido comenzará en 30 minutos';
-    case 'START':   return `${teamPair(m)}. Toca para ver el minuto a minuto`;
-    case 'HT':      return pairWithScore(m);
-    case 'ST':      return pairWithScore(m);
-    case 'END':     return pairWithScore(m);
-    case 'GOAL':    return pairWithScore(m);
-    default:        return '';
-  }
-};
-
-// ===== 5) Core =====
 const fetchJson = async (url) => {
-  const res = await fetch(url, { headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' } });
+  const res = await fetch(url, { headers: { 'cache-control': 'no-cache' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };
 
-// Ahora soporta {scope} y {id}
+// ===== 6) Lógica principal =====
 const getMatchUrl = (id, scope = SCOPE_DEFAULT) => {
-  if (!FEED_TMPL.includes('{id}')) throw new Error('FEED_TMPL debe contener {id}');
-  let base = FEED_TMPL.replace('{id}', String(id));
-  base = base.replace('{scope}', String(scope || SCOPE_DEFAULT));
+  let base = FEED_TMPL.replace('{id}', String(id)).replace('{scope}', scope);
   const sep = base.includes('?') ? '&' : '?';
-  return `${base}${sep}cb=${Date.now()}`; // anti-cache
+  return `${base}${sep}cb=${Date.now()}`;
 };
 
-// Lee IDs desde FEED_LIST_URL (home-week.json) o fallbacks
 const loadMatchList = async () => {
-  if (FEED_LIST_URL) {
-    try {
-      const data = await fetchJson(`${FEED_LIST_URL}?cb=${Date.now()}`);
-
-      // A) Si viene como array: [id] o [{id,scope}]
-      if (Array.isArray(data)) {
-        return data.map(x => {
-          if (typeof x === 'object' && x) {
-            const id = String(x.matchId ?? x.id ?? x.eventId ?? '');
-            const scope = String(x.scope ?? x.channel ?? SCOPE_DEFAULT).toLowerCase().trim();
-            return id ? { id, scope } : null;
-          }
-          const id = String(x);
-          return id ? { id, scope: SCOPE_DEFAULT } : null;
-        }).filter(Boolean);
-      }
-
-      // B) Objeto con `events` (formato home-week.json)
-      if (data && data.events && typeof data.events === 'object') {
-        const out = [];
-        for (const key of Object.keys(data.events)) {
-          // ej: "deportes.futbol.guatemala.784685"
-          const parts = key.split('.');
-          const id = parts[parts.length - 1];
-          const idx = parts.indexOf('futbol');
-          const scope = (idx >= 0 && parts[idx + 1]) ? parts[idx + 1] : SCOPE_DEFAULT;
-          if (id) out.push({ id: String(id), scope: String(scope).toLowerCase().trim() });
-        }
-        // quitar duplicados por id
-        const seen = new Set();
-        return out.filter(it => (seen.has(it.id) ? false : seen.add(it.id)));
-      }
-
-    } catch (e) {
-      console.error('[ids] error FEED_LIST_URL', e.message);
+  try {
+    const data = await fetchJson(`${FEED_LIST_URL}?cb=${Date.now()}`);
+    if (Array.isArray(data)) {
+      return data.map(x => ({
+        id: String(x.matchId ?? x.id ?? x.eventId ?? x),
+        scope: String(x.scope ?? SCOPE_DEFAULT).toLowerCase(),
+      })).filter(it => it.id);
     }
+    if (data?.events) {
+      const out = Object.keys(data.events).map(k => {
+        const parts = k.split('.');
+        const id = parts.pop();
+        const idx = parts.indexOf('futbol');
+        const scope = idx >= 0 && parts[idx + 1] ? parts[idx + 1] : SCOPE_DEFAULT;
+        return { id, scope: scope.toLowerCase() };
+      });
+      const seen = new Set();
+      return out.filter(it => (seen.has(it.id) ? false : seen.add(it.id)));
+    }
+  } catch (e) {
+    console.error('[ids]', e.message);
   }
-
-  // Fallbacks (si algún día los usas)
-  const MIX = (process.env.MATCH_IDS_WITH_SCOPE || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-  if (MIX.length) {
-    return MIX.map(item => {
-      const [id, sc] = item.split(':').map(s => s.trim());
-      return id ? { id: String(id), scope: (sc || SCOPE_DEFAULT).toLowerCase().trim() } : null;
-    }).filter(Boolean);
-  }
-  if (MATCH_IDS.length) return MATCH_IDS.map(id => ({ id: String(id), scope: SCOPE_DEFAULT }));
-
   return [];
 };
 
 const handleEvent = async (evt, m, extra = {}) => {
   const notification = { title: titleFor(evt, m, extra), body: bodyFor(evt, m) };
-
-  const data = {
-    screen: 'Match',
-    tab: tabForEvent(evt),
-    matchId: String(m.matchId),
-    channel: m.scope || SCOPE_DEFAULT,
-    event: evt,
-    statusId: String(m.statusId),
-    homeGoals: String(m.homeGoals),
-    awayGoals: String(m.awayGoals),
-  };
-  if (m.ymd)  data.ymd  = m.ymd;
-  if (m.hhmm) data.hhmm = m.hhmm;
-  if (m.gmt)  data.gmt  = m.gmt;
+  const data = { screen: 'Match', tab: tabForEvent(evt), matchId: m.matchId, channel: m.scope, event: evt };
 
   const parts = [];
   if (ENABLE_MATCH_TOPICS) parts.push(`'${TOPIC_PREFIX}${m.matchId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.homeTeamId) parts.push(`'${TEAM_PREFIX}${m.homeTeamId}' in topics`);
   if (ENABLE_TEAM_TOPICS && m.awayTeamId) parts.push(`'${TEAM_PREFIX}${m.awayTeamId}' in topics`);
+  if (ENABLE_NEWS_TOPIC && NEWS_EVENTS.includes(evt)) parts.push(`'${NEWS_TOPIC}' in topics`);
 
-  if (ENABLE_NEWS_TOPIC && NEWS_EVENTS.includes(evt)) {
-    const newsAllowed =
-      NEWS_ONLY_TEAM_IDS.length === 0 ||
-      NEWS_ONLY_TEAM_IDS.includes(String(m.homeTeamId)) ||
-      NEWS_ONLY_TEAM_IDS.includes(String(m.awayTeamId));
-    if (newsAllowed) parts.push(`'${NEWS_TOPIC}' in topics`);
-  }
-
-  if (parts.length) {
-    const condition = parts.join(' || ');
-    await sendCondition(condition, notification, data);
-  }
+  if (parts.length) await sendCondition(parts.join(' || '), notification, data);
 };
 
 const last = new Map();
 
 const tickMatch = async ({ id: matchId, scope: scopeHint }) => {
-  const url = getMatchUrl(matchId, scopeHint);
-  let raw;
-  try { raw = await fetchJson(url); }
-  catch (e) { console.error('[fetch]', matchId, e.message); return; }
+  try {
+    const m = normalizeMatch(await fetchJson(getMatchUrl(matchId, scopeHint)));
+    if (!m.matchId) m.matchId = String(matchId);
+    if (!m.scope) m.scope = scopeHint || SCOPE_DEFAULT;
+    console.log('[debug]', WATCHER_ID, m.matchId, 'status', m.statusId, 'score', `${m.homeGoals}-${m.awayGoals}`);
 
-  const m = normalizeMatch(raw);
-  if (!m.matchId) m.matchId = String(matchId);
-  if (!m.scope) m.scope = scopeHint || SCOPE_DEFAULT;
-
-  // debug
-  console.log('[debug]', m.matchId, 'status=', m.statusId, 'score=', `${m.homeGoals}-${m.awayGoals}`,
-              'lineups=', m.lineupsPublished, '|', m.homeName, 'vs', m.awayName,
-              '| ids=', m.homeTeamId, m.awayTeamId, '| scope=', m.scope);
-
-  // PRE30 (versión atómica)
-const startUtc = parseStartUtc(m);
-if (startUtc) {
-  const diffMs = startUtc - Date.now();
-  if (diffMs > 0 && diffMs <= PRE_PUSH_MIN * 60000) {
-    const key = sentKey(m, `pre${PRE_PUSH_MIN}`);
-    if (await tryMarkOnce(key)) {
-      await handleEvent('PRE30', m);
+    const startUtc = parseStartUtc(m);
+    if (startUtc) {
+      const diffMs = startUtc - Date.now();
+      if (diffMs > 0 && diffMs <= PRE_PUSH_MIN * 60000) {
+        const key = sentKey(m, `pre${PRE_PUSH_MIN}`);
+        if (await tryMarkOnce(key)) await handleEvent('PRE30', m);
+      }
     }
-  }
-}
 
+    const prev = last.get(m.matchId);
+    if (!prev) return void last.set(m.matchId, { ...m });
 
-  const prev = last.get(m.matchId);
-  if (!prev) { last.set(m.matchId, { ...m }); console.log('[state] init', m.matchId, m.homeName, 'vs', m.awayName); return; }
-
-  // Alineaciones
-  if (!prev.lineupsPublished && m.lineupsPublished) {
-    const key = sentKey(m, 'lineups');
-    if (!(await wasSent(key))) { await handleEvent('LINEUPS', m); await markSent(key); }
-  }
-
-  // Estados
-  if (prev.statusId !== m.statusId) {
-    if (prev.statusId === 0 && m.statusId === 1) {
-      const key = sentKey(m, 'start'); if (!(await wasSent(key))) { await handleEvent('START', m); await markSent(key); }
+    if (!prev.lineupsPublished && m.lineupsPublished && await tryMarkOnce(sentKey(m, 'lineups'))) {
+      await handleEvent('LINEUPS', m);
     }
-    if (m.statusId === 5) { const key = sentKey(m, 'ht'); if (!(await wasSent(key))) { await handleEvent('HT', m); await markSent(key); } }
-    if (m.statusId === 6) { const key = sentKey(m, 'st'); if (!(await wasSent(key))) { await handleEvent('ST', m); await markSent(key); } }
-    if (m.statusId === 2) { const key = sentKey(m, 'end'); if (!(await wasSent(key))) { await handleEvent('END', m); await markSent(key); } }
-  }
 
-  // Gol (idempotencia por marcador)
-  if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
-    const tag = `goal:${m.homeGoals}-${m.awayGoals}`;
-    const key = sentKey(m, tag);
-    if (!(await wasSent(key))) {
-      const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
-      await handleEvent('GOAL', m, extra);
-      await markSent(key, 24 * 3600);
+    if (prev.statusId !== m.statusId) {
+      if (prev.statusId === 0 && m.statusId === 1 && await tryMarkOnce(sentKey(m, 'start')))
+        await handleEvent('START', m);
+      if (m.statusId === 5 && await tryMarkOnce(sentKey(m, 'ht')))
+        await handleEvent('HT', m);
+      if (m.statusId === 6 && await tryMarkOnce(sentKey(m, 'st')))
+        await handleEvent('ST', m);
+      if (m.statusId === 2 && await tryMarkOnce(sentKey(m, 'end')))
+        await handleEvent('END', m);
     }
-  }
 
-  last.set(m.matchId, { ...m });
+    if (m.homeGoals > prev.homeGoals || m.awayGoals > prev.awayGoals) {
+      const key = sentKey(m, `goal:${m.homeGoals}-${m.awayGoals}`);
+      if (await tryMarkOnce(key, 24 * 3600)) {
+        const extra = { scorer: m.homeGoals > prev.homeGoals ? 'home' : 'away' };
+        await handleEvent('GOAL', m, extra);
+      }
+    }
+
+    last.set(m.matchId, { ...m });
+  } catch (e) {
+    console.error('[tick]', WATCHER_ID, matchId, e.message);
+  }
 };
 
 const loop = async () => {
-  if (SEND_TEST_ON_BOOT) {
-    await sendToTopics([LEGACY_TOPIC].filter(Boolean),
-      { title: 'Watcher OK', body: 'Arrancó correctamente.' },
-      { screen: 'Match', tab: 'detalles' });
-  }
+  if (SEND_TEST_ON_BOOT)
+    await sendCondition(`'${LEGACY_TOPIC}' in topics`, { title: 'Watcher OK', body: 'Arrancó correctamente.' });
 
   let list = await loadMatchList();
-  if (!list.length) console.warn('⚠️ No hay partidos (FEED_LIST_URL vacío o sin eventos).');
-
+  if (!list.length) console.warn('⚠️ No hay partidos activos.');
   while (true) {
     try {
-      if (FEED_LIST_URL) list = await loadMatchList(); // refresca cada ciclo
+      if (FEED_LIST_URL) list = await loadMatchList();
       await Promise.all(list.map(item => tickMatch(item)));
     } catch (e) {
-      console.error('[loop] error', e.message);
+      console.error('[loop]', WATCHER_ID, e.message);
     }
     await sleep(POLL_MS);
   }
 };
 
-loop().catch(e => console.error('[fatal]', e));
-process.on('SIGTERM', () => { console.log('[watcher] apagando…'); process.exit(0); });
+loop().catch(e => console.error('[fatal]', WATCHER_ID, e));
+process.on('SIGTERM', () => { console.log('[watcher]', WATCHER_ID, 'apagando…'); process.exit(0); });
